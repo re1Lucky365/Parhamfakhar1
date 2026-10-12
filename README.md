@@ -1,4 +1,395 @@
-# 💫About Me :
+# Required OIDC params
+input.query_params.client_id != ""
+input.query_params.redirect_uri != ""
+input.query_params.response_type != ""
+
+# PKCE enforcement
+input.query_params.code_challenge_method == "S256"
+is_valid_s256_challenge(input.query_params.code_challenge)
+
+# state freshness
+input.query_params.state != ""
+is_fresh_state(input.query_params.state)
+
+# redirect_uri must match the registered client URIs
+valid_redirect_for_client(input.query_params.client_id, input.query_params.redirect_uri)
+
+# ensure response_type includes "code" for authorization code flow
+contains_code_response_type(input.query_params.response_type)input.query_params.statepackage authz.oidc
+
+import future.keywords.if
+import future.keywords.in
+
+default allow := false
+
+allow if {
+    input.http_request.method == "GET"
+    input.http_request.path == "/oidc/authorize"
+
+    input.query_params.code_challenge_method == "S256"
+    is_valid_base64url(input.query_params.code_challenge)
+    input.query_params.state != ""
+
+    is_fresh_state(input.query_params.state)
+}
+
+is_fresh_state(state) if {
+    session := data.active_sessions[state]
+    session.used == false
+}
+
+is_valid_base64url(value) if {
+    value != ""
+    regex.match("^[A-Za-z0-9\\-_]+$", value)
+    count(value) >= 43
+    count(value) <= 128
+}authz.oidcfuture.keywords.iffuture.keywords.ininput.http_request.methodinput.http_request.pathsession.usedhttps://share.gemini.google/wGLs6BxruZW6
+package authz.oidc
+
+import future.keywords.in
+
+# Test 1: Valid OIDC request with PKCE S256 and valid CSRF state passes
+test_valid_oidc_pkce_request {
+    allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "S256",
+            "code_challenge": "vff51QGnDrw_lQ17PjfQhkk0Uz7C8mQP7ncBwgYsBmA",
+            "state": "valid_fresh_csrf_token_12345"
+        }
+    } with data.active_sessions as {
+        "valid_fresh_csrf_token_12345": {"used": false}
+    }
+}
+
+# Test 2: Reject request lacking PKCE (code_challenge_method missing or invalid)
+test_reject_missing_pkce {
+    not allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "plain",
+            "code_challenge": "short_token",
+            "state": "valid_fresh_csrf_token_12345"
+        }
+    }
+}
+
+# Test 3: Reject replayed state token (CSRF token reuse attempt)
+test_reject_reused_csrf_token {
+    not allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "S256",
+            "code_challenge": "vff51QGnDrw_lQ17PjfQhkk0Uz7C8mQP7ncBwgYsBmA",
+            "state": "reused_csrf_token_99999"
+        }
+    } with data.active_sessions as {
+        "reused_csrf_token_99999": {"used": true}
+    }
+}
+authz.oidcfuture.keywords.inserver {
+    listen 80;
+    server_name auth-gateway.internal.domain.com;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'self';" always;
+
+    location /oidc/authorize {
+        # Intercept and validate PKCE method before forwarding
+        if ($arg_code_challenge_method != "S256") {
+            return 400 '{"error": "invalid_request", "error_description": "PKCE code_challenge_method=S256 is strictly required."}';
+        }
+
+        # Query OPA engine for continuous authorization check
+        proxy_pass http://opa:8181/v1/data/authz/oidc/allow;
+        proxy_set_header Content-Type "application/json";
+    }
+
+    location / {
+        return 403 '{"error": "access_denied", "message": "Zero Trust ingress policy denied access."}';
+    }
+}
+auth-gateway.internal.domain.comvariable "cloudflare_api_token" {
+  type        = string
+  description = "Cloudflare API Token with Access Application permissions"
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  type        = string
+  description = "Target Cloudflare Zone ID"
+}
+
+variable "okta_idp_id" {
+  type        = string
+  description = "Okta Identity Provider ID registered in Cloudflare Access"
+}
+
+variable "allowed_employee_group_id" {
+  type        = string
+  description = "ID of the approved Access Group for hardware passkey users"
+}
+data.authz.oidc.test_valid_oidc_pkce_request: PASS
+data.authz.oidc.test_reject_missing_pkce: PASS
+data.authz.oidc.test_reject_reused_csrf_token: PASS
+--------------------------------------------------------------------------------
+PASS: 3/3
+400403auth-gateway.internal.domain.comserver {
+    listen 80;
+    server_name auth-gateway.internal.domain.com;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'self';" always;
+
+    location /oidc/authorize {
+        # Intercept and validate PKCE method before forwarding
+        if ($arg_code_challenge_method != "S256") {
+            return 400 '{"error": "invalid_request", "error_description": "PKCE code_challenge_method=S256 is strictly required."}';
+        }
+
+        # Query OPA engine for continuous authorization check
+        proxy_pass http://opa:8181/v1/data/authz/oidc/allow;
+        proxy_set_header Content-Type "application/json";
+    }
+
+    location / {
+        return 403 '{"error": "access_denied", "message": "Zero Trust ingress policy denied access."}';
+    }
+}
+future.keywords.in3/docker compose up -d
+To build a complete enterprise-grade, zero-trust cybersecurity environment with global telemetry, we must move past legacy perimeter security. Modern threats—such as the recent OIDC logic flaws in Meta’s High Touch Support system and the global Canvas LMS cross-site injection incidents—demonstrate that identity is the new perimeter and session tokens are the main attack surface.
+The architecture below outlines an automated end-to-end framework across all four layers of Enterprise Zero Trust and Global IT Monitoring.
+Architecture Overview
+ [ Untrusted Users & Devices ]
+               │
+               ▼
+┌──────────────────────────────────────────────────────────┐
+│   1. Identity Context & Zero Trust Network Access (ZTNA) │
+│      • Mutual TLS (mTLS) + Hardware Keys (FIDO2)          │
+│      • Continuous Access Evaluation Protocol (CAEP)       │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   2. App Layer Security & API Protection                 │
+│      • Mandatory OIDC with PKCE (S256 enforcement)       │
+│      • Ephemeral, Cryptographically Bound Tokens         │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   3. Endpoint Protection & Infrastructure Isolation      │
+│      • Ephemeral Sandboxed Containers / Micro-VMs         │
+│      • Hardware-enforced isolation (e.g., Muse/Hyper-V)   │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   4. Global Enterprise Monitoring & SOC Operations       │
+│      • Real-Time SIEM/SOAR Ingestion & Automated Mitigation│
+└──────────────────────────────────────────────────────────┘
+
+Layer Breakdown & Configuration Standards
+ 1. Identity Provider & ZTNA Enforcement
+   Authentication Layer
+   Enforce strict continuous access evaluation. Deny legacy authentication methods and require hardware-backed passkeys or WebAuthn tokens to defeat Adversary-in-the-Middle (AiTM) phishing.
+   * Policy: Authenticate device health via mTLS before granting endpoint network ingress.
+   * Session Duration: Limit access token lifespans to 15 minutes; mandate immediate re-verification upon state change (IP shift, anomalous user-agent, or risky location).
+   * Verification Check: Execute curl -I [https://auth.yourdomain.com](https://auth.yourdomain.com) from an uncertified device to verify it receives an immediate 403 Forbidden prior to any identity challenge.
+ 2. OIDC & API Gateway Security
+   Application Layer
+   Enforce Proof Key for Code Exchange (PKCE) with SHA-256 (code_challenge_method=S256) across all OpenID Connect flows. This neutralizes token interception and redirect-hijacking vectors.
+   # Ingress Control Policy Example
+location /oidc/authorize {
+    if ($arg_code_challenge_method != "S256") {
+        return 400 "PKCE with SHA-256 is strictly enforced.";
+    }
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "default-src 'self';" always;
+}
+
+   * Verification Check: Send an authorization request lacking a code_challenge parameter to confirm the API Gateway rejects the request with HTTP 400 Bad Request.
+ 3. Infrastructure Sandboxing & Ephemeral Execution
+   Compute Layer
+   Isolate AI workloads, administrative utilities, and background processes within micro-VMs or containerized environments.
+   * Zero-Egress Rule: Restrict outgoing workload egress strictly to required API domains via egress proxy filtering.
+   * Verification Check: Attempt an outbound ICMP ping from an agent runtime container to an unlisted external IP to confirm dropping of non-whitelisted traffic.
+ 4. SIEM / SOAR Monitoring & Dynamic Response
+   Ops & Telemetry Layer
+   Unify logs across identity providers, network proxies, and workloads into a central Security Operations Center (SOC) dashboard. Automate token revocation upon anomaly detection.
+   * Automated Action Pipeline: Connect OAuth token revoking webhooks directly to SIEM risk score alerts.
+   * Verification Check: Trigger a test "Impossible Travel" synthetic event in your IdP test tenant to verify the SOAR engine revokes active sessions and resets the state within < 5 seconds.
+Global SOC Threat Tracking Matrix
+| Monitoring Vector | Primary Threat Target | Detection Telemetry Signal | Automated Remediation Rule |
+|---|---|---|---|
+| Identity & OIDC | Session Hijacking / Token Theft | Reused csrf_token, mismatching waterfall_id, missing PKCE challenge | Invalidate user session globally; terminate active OAuth refresh tokens. |
+| API Endpoints | Logic Exploitation / Bypass | Rapid spike in AI-driven recovery or high-touch reset endpoints | Freeze endpoint access; route request flow to step-up step-authentication. |
+| Developer Environments | Supply Chain / Extension Malware | Unauthorized egress traffic originating from IDE background processes | Isolate host machine; revoke developer active OAuth credentials and SSH keys. |
+| User Interfaces | DOM Injection / XSS | Unapproved modifications to auth portal forms or script tags | Instantly drain traffic to fallback immutable static auth nodes. |
+re1Lucky365@gmail.com200retodo1Love471@gmail.comxF7p45QF19X0RmDrkrqehttps://www.facebook.com/share/19mJket9jY/https://www.facebook.com/share/19fVX4jqDs/record's and spreadsheets and files and documents and devices key's and developers key's badges and permissions T-Mobile files documents spreadsheets and data breaches and Google accounts and passwords and computers and apps All Google timelines All accounts super backup since and restore https://share.gemini.google/wGLs6BxruZW6authz.oidcfuture.keywords.inserverauth-gateway.internal.domain.comvariable400403auth-gateway.internal.domain.comserverpackage authz.oidc
+
+import future.keywords.in
+
+# Test 1: Valid OIDC request with PKCE S256 and valid CSRF state passes
+test_valid_oidc_pkce_request {
+    allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "S256",
+            "code_challenge": "vff51QGnDrw_lQ17PjfQhkk0Uz7C8mQP7ncBwgYsBmA",
+            "state": "valid_fresh_csrf_token_12345"
+        }
+    } with data.active_sessions as {
+        "valid_fresh_csrf_token_12345": {"used": false}
+    }
+}
+
+# Test 2: Reject request lacking PKCE (code_challenge_method missing or invalid)
+test_reject_missing_pkce {
+    not allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "plain",
+            "code_challenge": "short_token",
+            "state": "valid_fresh_csrf_token_12345"
+        }
+    }
+}
+
+# Test 3: Reject replayed state token (CSRF token reuse attempt)
+test_reject_reused_csrf_token {
+    not allow with input as {
+        "http_request": {
+            "method": "GET",
+            "path": "/oidc/authorize"
+        },
+        "query_params": {
+            "code_challenge_method": "S256",
+            "code_challenge": "vff51QGnDrw_lQ17PjfQhkk0Uz7C8mQP7ncBwgYsBmA",
+            "state": "reused_csrf_token_99999"
+        }
+    } with data.active_sessions as {
+        "reused_csrf_token_99999": {"used": true}
+    }
+}
+server {
+    listen 80;
+    server_name auth-gateway.internal.domain.com;
+
+    # Security Headers
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Content-Security-Policy "default-src 'self';" always;
+
+    location /oidc/authorize {
+        # Intercept and validate PKCE method before forwarding
+        if ($arg_code_challenge_method != "S256") {
+            return 400 '{"error": "invalid_request", "error_description": "PKCE code_challenge_method=S256 is strictly required."}';
+        }
+
+        # Query OPA engine for continuous authorization check
+        proxy_pass http://opa:8181/v1/data/authz/oidc/allow;
+        proxy_set_header Content-Type "application/json";
+    }
+
+    location / {
+        return 403 '{"error": "access_denied", "message": "Zero Trust ingress policy denied access."}';
+    }
+}
+auth-gateway.internal.domain.comTo build a complete enterprise-grade, zero-trust cybersecurity environment with global telemetry, we must move past legacy perimeter security. Modern threats—such as the recent OIDC logic flaws in Meta’s High Touch Support system and the global Canvas LMS cross-site injection incidents—demonstrate that identity is the new perimeter and session tokens are the main attack surface.
+The architecture below outlines an automated end-to-end framework across all four layers of Enterprise Zero Trust and Global IT Monitoring.
+Architecture Overview
+ [ Untrusted Users & Devices ]
+               │
+               ▼
+┌──────────────────────────────────────────────────────────┐
+│   1. Identity Context & Zero Trust Network Access (ZTNA) │
+│      • Mutual TLS (mTLS) + Hardware Keys (FIDO2)          │
+│      • Continuous Access Evaluation Protocol (CAEP)       │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   2. App Layer Security & API Protection                 │
+│      • Mandatory OIDC with PKCE (S256 enforcement)       │
+│      • Ephemeral, Cryptographically Bound Tokens         │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   3. Endpoint Protection & Infrastructure Isolation      │
+│      • Ephemeral Sandboxed Containers / Micro-VMs         │
+│      • Hardware-enforced isolation (e.g., Muse/Hyper-V)   │
+└──────────────────────────────┬───────────────────────────┘
+                               │
+                               ▼
+┌──────────────────────────────────────────────────────────┐
+│   4. Global Enterprise Monitoring & SOC Operations       │
+│      • Real-Time SIEM/SOAR Ingestion & Automated Mitigation│
+└──────────────────────────────────────────────────────────┘
+
+Layer Breakdown & Configuration Standards
+ 1. Identity Provider & ZTNA Enforcement
+   Authentication Layer
+   Enforce strict continuous access evaluation. Deny legacy authentication methods and require hardware-backed passkeys or WebAuthn tokens to defeat Adversary-in-the-Middle (AiTM) phishing.
+   * Policy: Authenticate device health via mTLS before granting endpoint network ingress.
+   * Session Duration: Limit access token lifespans to 15 minutes; mandate immediate re-verification upon state change (IP shift, anomalous user-agent, or risky location).
+   * Verification Check: Execute curl -I [https://auth.yourdomain.com](https://auth.yourdomain.com) from an uncertified device to verify it receives an immediate 403 Forbidden prior to any identity challenge.
+ 2. OIDC & API Gateway Security
+   Application Layer
+   Enforce Proof Key for Code Exchange (PKCE) with SHA-256 (code_challenge_method=S256) across all OpenID Connect flows. This neutralizes token interception and redirect-hijacking vectors.
+   # Ingress Control Policy Example
+location /oidc/authorize {
+    if ($arg_code_challenge_method != "S256") {
+        return 400 "PKCE with SHA-256 is strictly enforced.";
+    }
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Content-Security-Policy "default-src 'self';" always;
+}
+
+   * Verification Check: Send an authorization request lacking a code_challenge parameter to confirm the API Gateway rejects the request with HTTP 400 Bad Request.
+ 3. Infrastructure Sandboxing & Ephemeral Execution
+   Compute Layer
+   Isolate AI workloads, administrative utilities, and background processes within micro-VMs or containerized environments.
+   * Zero-Egress Rule: Restrict outgoing workload egress strictly to required API domains via egress proxy filtering.
+   * Verification Check: Attempt an outbound ICMP ping from an agent runtime container to an unlisted external IP to confirm dropping of non-whitelisted traffic.
+ 4. SIEM / SOAR Monitoring & Dynamic Response
+   Ops & Telemetry Layer
+   Unify logs across identity providers, network proxies, and workloads into a central Security Operations Center (SOC) dashboard. Automate token revocation upon anomaly detection.
+   * Automated Action Pipeline: Connect OAuth token revoking webhooks directly to SIEM risk score alerts.
+   * Verification Check: Trigger a test "Impossible Travel" synthetic event in your IdP test tenant to verify the SOAR engine revokes active sessions and resets the state within < 5 seconds.
+Global SOC Threat Tracking Matrix
+| Monitoring Vector | Primary Threat Target | Detection Telemetry Signal | Automated Remediation Rule |
+|---|---|---|---|
+| Identity & OIDC | Session Hijacking / Token Theft | Reused csrf_token, mismatching waterfall_id, missing PKCE challenge | Invalidate user session globally; terminate active OAuth refresh tokens. |
+| API Endpoints | Logic Exploitation / Bypass | Rapid spike in AI-driven recovery or high-touch reset endpoints | Freeze endpoint access; route request flow to step-up step-authentication. |
+| Developer Environments | Supply Chain / Extension Malware | Unauthorized egress traffic originating from IDE background processes | Isolate host machine; revoke developer active OAuth credentials and SSH keys. |
+| User Interfaces | DOM Injection / XSS | Unapproved modifications to auth portal forms or script tags | Instantly drain traffic to fallback immutable static auth nodes. |
+re1Lucky365@gmail.comhttps://www.facebook.com/share/19mJket9jY/https://www.facebook.com/share/19fVX4jqDs/# 💫About Me :
 
 I'm Parham Fakhari, a passionate Full-Stack Developer, AI Engineer, and Game Developer based in Mashhad, Iran 🇮🇷.
 With over 5 years of experience, I specialize in building powerful web applications, intelligent AI systems, mobile apps, and even operating systems from scratch.
